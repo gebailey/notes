@@ -1,0 +1,90 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Flowroute Message Forwarder
+
+Resources:
+  MessagesBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub flowroute-messages-${AWS::AccountId}
+
+  MessagesBucketParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: flowroute_messages_bucket
+      Type: String
+      Value: !Ref MessagesBucket
+
+  PolicyS3:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: PolicyS3
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:PutObject
+            Resource: !Join
+              - ""
+              - - !GetAtt MessagesBucket.Arn
+                - "/*"
+
+  MessagesRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: MessagesRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMReadOnlyAccess
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - !Ref PolicyS3
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+
+  MessageProcessor:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        ZipFile: |
+          import boto3
+          import json
+          def handler(event, context):
+              print("Event: %s" % json.dumps(event))
+              return {
+                  'statusCode': 200,
+                  'body': json.dumps('Hello from Lambda!')
+              }
+      Description: Process incoming SMS and MMS messages from Flowroute
+      FunctionName: MessageProcessor
+      Handler: index.handler
+      MemorySize: 256
+      Role: !GetAtt MessagesRole.Arn
+      Runtime: python3.7
+      Timeout: 15
+
+  HttpApi:
+    DependsOn: MessageProcessor
+    Type: 'AWS::ApiGatewayV2::Api'
+    Properties:
+      Name: HttpApi
+      Description: Flowroute Message Forwarder
+      ProtocolType: HTTP
+      Target: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:MessageProcessor/invocations
+
+  MessagesPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref MessageProcessor
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/$default/$default"
+
+Outputs:
+  ApiEndpoint:
+    Value: !GetAtt HttpApi.ApiEndpoint
