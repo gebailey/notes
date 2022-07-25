@@ -1,0 +1,163 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Web Redirector
+
+Parameters:
+  HostedZoneName:
+    Type: String
+    Description: Hosted Zone Name
+  TargetZoneName:
+    Type: String
+    Description: Target Zone Name (redirect target)
+
+Resources:
+  HostedZone:
+    Type: AWS::Route53::HostedZone
+    Properties:
+      HostedZoneConfig:
+        Comment: !Sub "Web redirector for ${HostedZoneName}"
+      Name: !Ref HostedZoneName
+
+  Certificate:
+    Type: AWS::CertificateManager::Certificate
+    Properties:
+      DomainName: !Ref HostedZoneName
+      DomainValidationOptions:
+        - DomainName: !Ref HostedZoneName
+          HostedZoneId: !Ref HostedZone
+        - DomainName: !Sub "www.${HostedZoneName}"
+          HostedZoneId: !Ref HostedZone
+      SubjectAlternativeNames:
+        - !Sub "www.${HostedZoneName}"
+      ValidationMethod: DNS
+
+  Role:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: WebRedirector
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMReadOnlyAccess
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+
+  Lambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        ZipFile: !Sub |
+          def handler(event, context):
+              return {
+                  "statusCode": 301,
+                  "headers": {"Location": f"https://${TargetZoneName}{event['rawPath']}"}
+              }
+      Description: Return redirect responses to incoming web requests
+      FunctionName: WebRedirector
+      Handler: index.handler
+      MemorySize: 128
+      Role: !GetAtt Role.Arn
+      Runtime: python3.9
+      Timeout: 15
+
+  Api:
+    DependsOn: Lambda
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: WebRedirector
+      Description: Web Redirector
+      ProtocolType: HTTP
+      Target: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:WebRedirector/invocations"
+
+  Permission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref Lambda
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${Api}/$default/$default"
+
+  Distribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Aliases:
+          - !Ref HostedZoneName
+          - !Sub "www.${HostedZoneName}"
+        DefaultCacheBehavior:
+          AllowedMethods: ["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"]
+          CachedMethods: ["GET", "HEAD", "OPTIONS"]
+          ForwardedValues:
+            Headers:
+            - Access-Control-Request-Headers
+            - Access-Control-Request-Method
+            - Origin
+            - Authorization
+            QueryString: true
+          TargetOriginId: APIGatewayOrigin
+          ViewerProtocolPolicy: redirect-to-https
+          Compress: true
+          DefaultTTL: 0
+        Enabled: true
+        IPV6Enabled: true
+        Origins:
+        - Id: APIGatewayOrigin
+          DomainName: !Sub ${Api}.execute-api.${AWS::Region}.amazonaws.com
+          CustomOriginConfig:
+            HTTPSPort: 443
+            OriginProtocolPolicy: https-only
+        PriceClass: PriceClass_100
+        ViewerCertificate:
+          AcmCertificateArn: !Ref Certificate
+          MinimumProtocolVersion: TLSv1.1_2016
+          SslSupportMethod: sni-only
+
+  RecordSet:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      Name: !Sub ${HostedZoneName}
+      Type: A
+      HostedZoneName: !Sub ${HostedZoneName}.
+      AliasTarget:
+        HostedZoneId: Z2FDTNDATAQYW2
+        DNSName: !GetAtt Distribution.DomainName
+
+  RecordSetAlt:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      Name: !Sub www.${HostedZoneName}
+      Type: A
+      HostedZoneName: !Sub ${HostedZoneName}.
+      AliasTarget:
+        HostedZoneId: Z2FDTNDATAQYW2
+        DNSName: !GetAtt Distribution.DomainName
+
+  RecordSetIPv6:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      Name: !Sub ${HostedZoneName}
+      Type: AAAA
+      HostedZoneName: !Sub ${HostedZoneName}.
+      AliasTarget:
+        HostedZoneId: Z2FDTNDATAQYW2
+        DNSName: !GetAtt Distribution.DomainName
+
+  RecordSetAltIPv6:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      Name: !Sub www.${HostedZoneName}
+      Type: AAAA
+      HostedZoneName: !Sub ${HostedZoneName}.
+      AliasTarget:
+        HostedZoneId: Z2FDTNDATAQYW2
+        DNSName: !GetAtt Distribution.DomainName
+
+Outputs:
+  ApiEndpoint:
+    Value: !GetAtt [Api, ApiEndpoint]
+  NameServers:
+    Value: !Join [ ",", !GetAtt [HostedZone, NameServers] ]
