@@ -1,0 +1,127 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Web Redirector
+
+# https://gist.github.com/mikebroberts/09e8c8b4aaac6e26149c4622fd492414
+
+Parameters:
+  HostedZoneName:
+    Type: String
+    Description: Hosted Zone Name
+  TargetZoneName:
+    Type: String
+    Description: Target Zone Name (redirect target)
+
+Resources:
+  HostedZone:
+    Type: AWS::Route53::HostedZone
+    Properties:
+      Name: !Ref HostedZoneName
+      HostedZoneConfig:
+        Comment: !Sub "Web redirector for ${HostedZoneName}"
+
+  Certificate:
+    Type: AWS::CertificateManager::Certificate
+    Properties:
+      DomainName: !Ref HostedZoneName
+      SubjectAlternativeNames:
+        - !Sub "www.${HostedZoneName}"
+      ValidationMethod: DNS
+      DomainValidationOptions:
+        - DomainName: !Ref HostedZoneName
+          HostedZoneId: !Ref HostedZone
+        - DomainName: !Sub "www.${HostedZoneName}"
+          HostedZoneId: !Ref HostedZone
+
+  Function:
+    Type: AWS::CloudFront::Function
+    Properties:
+      Name: WebRedirector
+      FunctionConfig:
+        Comment: Return HTTP 301 redirect for any request
+        Runtime: cloudfront-js-1.0
+      AutoPublish: true
+      FunctionCode: !Sub |
+        function handler(event) {
+          return {
+            statusCode: 301,
+            statusDescription: 'Moved Permanently',
+            headers: {
+              location: { value: 'https://${TargetZoneName}' + event.request.uri }
+            }
+          }
+        }
+
+  Distribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Aliases:
+          - !Ref HostedZoneName
+          - !Sub "www.${HostedZoneName}"
+        DefaultCacheBehavior:
+          TargetOriginId: redirectOrigin
+          ViewerProtocolPolicy: redirect-to-https
+          # "Managed-CachingDisabled" from https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/using-managed-cache-policies.html
+          CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
+          FunctionAssociations:
+            - EventType: viewer-request
+              FunctionARN: !GetAtt Function.FunctionMetadata.FunctionARN
+        Enabled: true
+        IPV6Enabled: true
+        # CloudFront requires at least one origin, even though we're always going to redirect
+        Origins:
+          - Id: redirectOrigin
+            DomainName: !Ref TargetZoneName
+            CustomOriginConfig:
+              OriginProtocolPolicy: match-viewer
+        PriceClass: PriceClass_100
+        ViewerCertificate:
+          AcmCertificateArn: !Ref Certificate
+          MinimumProtocolVersion: TLSv1.1_2016
+          SslSupportMethod: sni-only
+
+  RecordSet:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      Name: !Sub ${HostedZoneName}
+      Type: A
+      HostedZoneName: !Sub ${HostedZoneName}.
+      AliasTarget:
+        HostedZoneId: Z2FDTNDATAQYW2
+        DNSName: !GetAtt Distribution.DomainName
+
+  RecordSetAlt:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      Name: !Sub www.${HostedZoneName}
+      Type: A
+      HostedZoneName: !Sub ${HostedZoneName}.
+      AliasTarget:
+        HostedZoneId: Z2FDTNDATAQYW2
+        DNSName: !GetAtt Distribution.DomainName
+
+  RecordSetIPv6:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      Name: !Sub ${HostedZoneName}
+      Type: AAAA
+      HostedZoneName: !Sub ${HostedZoneName}.
+      AliasTarget:
+        HostedZoneId: Z2FDTNDATAQYW2
+        DNSName: !GetAtt Distribution.DomainName
+
+  RecordSetAltIPv6:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      Name: !Sub www.${HostedZoneName}
+      Type: AAAA
+      HostedZoneName: !Sub ${HostedZoneName}.
+      AliasTarget:
+        HostedZoneId: Z2FDTNDATAQYW2
+        DNSName: !GetAtt Distribution.DomainName
+
+Outputs:
+  NameServers:
+    Value: !Join [ ",", !GetAtt HostedZone.NameServers ]
+  DistributionDomainName:
+    Value: !GetAtt Distribution.DomainName
